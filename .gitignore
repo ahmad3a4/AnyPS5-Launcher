@@ -1,0 +1,9 @@
+# Your library, settings, save backups and fonts
+launcher/data/
+
+# AnyPS5 builds and releases the launcher installs next to itself
+/AnyPS5-*/
+
+__pycache__/
+*.pyc
+*.log
