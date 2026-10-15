@@ -246,6 +246,19 @@ class SettingsTests(unittest.TestCase):
         del summary["absent_examples"]
         self.assertEqual(core.audit_verdict(summary)[1], "error", "older audits without examples still work")
 
+    def test_audit_verdict_lets_optional_functions_through(self):
+        summary = {"implemented": 99, "stub": 0, "absent": 0, "optional_missing": 1, "module": 0, "missing_libraries": 0}
+        verdict, level = core.audit_verdict(summary)
+        self.assertEqual(level, "ok")
+        self.assertTrue(verdict.startswith("Should start"))
+        self.assertIn("1 optional function it can run without is missing", verdict)
+        summary["stub"] = 2
+        verdict, level = core.audit_verdict(summary)
+        self.assertEqual(level, "warn")
+        self.assertIn("optional", verdict)
+        summary["absent"] = 1
+        self.assertEqual(core.audit_verdict(summary)[1], "error", "a required missing function still blocks")
+
     def test_hints(self):
         settings = core.GameSettings(to_intel=False)
         self.assertIn("Intel CPU fix", core.hint_for_exit(0xC000001D, settings))

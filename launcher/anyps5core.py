@@ -713,10 +713,14 @@ def audit(game: Game, source_repo: Path, log: Log) -> dict:
         raise LauncherError("The compatibility check could not run; see the log.")
     counts = result["unique_by_class"]
     absent = [record for record in result.get("imports", []) if record.get("class") == "absent"]
-    summary = {"implemented": counts.get("implemented", 0), "stub": counts.get("stub", 0), "absent": counts.get("absent", 0),
+    # A weak import the loader cannot resolve becomes null instead of stopping the start, so only the others block it.
+    required = [record for record in absent if not record.get("weak")]
+    optional = len(absent) - len(required)
+    summary = {"implemented": counts.get("implemented", 0), "stub": counts.get("stub", 0),
+               "absent": max(0, counts.get("absent", 0) - optional), "optional_missing": optional,
                "module": counts.get("module", 0), "missing_libraries": len(result.get("missing_libraries", {})),
                "absent_examples": [f"{record.get('name') or record['nid']} ({record.get('library') or 'unnamed library'})"
-                                   for record in absent[:3]],
+                                   for record in required[:3]],
                "at": time.strftime("%Y-%m-%d %H:%M")}
     # Functions that were missing or unfinished at the previous check and are implemented now.
     improved = []
@@ -750,7 +754,7 @@ def record_audit_history(game: Game, summary: dict) -> None:
 
 
 def implemented_share(entry: dict) -> float:
-    total = entry["implemented"] + entry["stub"] + entry["absent"]
+    total = entry["implemented"] + entry["stub"] + entry["absent"] + entry.get("optional_missing", 0)
     return 100 * entry["implemented"] / total if total else 100.0
 
 
@@ -767,15 +771,21 @@ def history_trend(game: Game) -> Optional[str]:
 
 
 def audit_verdict(summary: dict) -> tuple[str, str]:
-    total = summary["implemented"] + summary["stub"] + summary["absent"]
-    share = 100 * summary["implemented"] / total if total else 100
+    optional = summary.get("optional_missing", 0)
+    total = summary["implemented"] + summary["stub"] + summary["absent"] + optional
+    share = implemented_share(summary)
+    optional_note = (f"; {optional} optional function{'s' if optional != 1 else ''} it can run without "
+                     f"{'are' if optional != 1 else 'is'} missing") if optional else ""
     if summary["absent"] or summary["missing_libraries"]:
         examples = summary.get("absent_examples") or []
         return (f"Will not start yet: AnyPS5 lacks {summary['absent']} system functions and {summary['missing_libraries']} "
                 f"libraries this game needs ({share:.0f}% of imports implemented)"
                 + (f", e.g. {', '.join(examples)}" if examples else "")), "error"
     if summary["stub"]:
-        return f"Should start, may stop when it calls one of {summary['stub']} unfinished functions ({share:.0f}% implemented)", "warn"
+        return (f"Should start, may stop when it calls one of {summary['stub']} unfinished functions ({share:.0f}% implemented)"
+                + optional_note), "warn"
+    if optional:
+        return f"Should start: every function it needs is implemented ({share:.0f}% of imports){optional_note}", "ok"
     return f"Every system function it imports is implemented ({total} imports)", "ok"
 
 

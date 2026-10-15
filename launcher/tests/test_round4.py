@@ -86,6 +86,43 @@ class WhatsNewTests(unittest.TestCase):
             self.assertEqual((summary["improved_count"], summary["improved"]), (2, ["sceKernelFoo", "n2"]))
             self.assertTrue(any("2 functions this game uses became available" in line for line in lines))
 
+    def test_audit_does_not_block_on_weak_imports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            game = core.Game("g1", "Test", "PPSA1", "", str(root / "s"), "eboot.bin", str(root / "o"))
+            (game.output / core.STAGING_DIR).mkdir(parents=True)
+            (game.output / "eboot.registry.json").write_text("{}")
+            (root / "tools").mkdir()
+            (root / "tools" / "import_audit.py").write_text("")
+
+            def fake_run(command, log, cwd=None, env=None, cancel=None):
+                (game.output / core.AUDIT_JSON).write_text(json.dumps({
+                    "unique_by_class": {"implemented": 3, "stub": 0, "absent": 2, "module": 0}, "missing_libraries": {},
+                    "imports": [{"nid": "n1", "library": "libkernel.prx", "class": "implemented", "name": None},
+                                {"nid": "n2", "library": "libSceLncUtil.prx", "class": "absent", "name": None, "weak": True},
+                                {"nid": "n3", "library": "libSceFoo.prx", "class": "absent", "name": None}]}))
+                return 1
+
+            lines = []
+            with mock.patch.object(core, "run_streaming", fake_run):
+                summary = core.audit(game, root, lambda text, tag: lines.append((text, tag)))
+            self.assertEqual((summary["absent"], summary["optional_missing"]), (1, 1))
+            self.assertEqual(summary["absent_examples"], ["n3 (libSceFoo.prx)"], "only required functions are named")
+            self.assertEqual(lines[-1][1], "error")
+
+            def fake_run_weak_only(command, log, cwd=None, env=None, cancel=None):
+                (game.output / core.AUDIT_JSON).write_text(json.dumps({
+                    "unique_by_class": {"implemented": 3, "stub": 0, "absent": 1, "module": 0}, "missing_libraries": {},
+                    "imports": [{"nid": "n2", "library": "libSceLncUtil.prx", "class": "absent", "name": None, "weak": True}]}))
+                return 1
+
+            lines.clear()
+            with mock.patch.object(core, "run_streaming", fake_run_weak_only):
+                summary = core.audit(game, root, lambda text, tag: lines.append((text, tag)))
+            self.assertEqual((summary["absent"], summary["optional_missing"]), (0, 1))
+            self.assertEqual(lines[-1][1], "ok")
+            self.assertNotIn("Will not start", lines[-1][0])
+
 
 @unittest.skipUnless(os.name == "nt", "Windows screen capture")
 class ScreenshotTests(unittest.TestCase):
