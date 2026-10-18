@@ -55,6 +55,7 @@ OUTPUT_EXE = "eboot.exe"
 STAGING_DIR = "_input"
 MARKER_FILE = ".anyps5-launcher.json"
 RUN_LOG = "anyps5-last-run.log"
+UPDATE_LOG = "anyps5-last-update.log"
 AUDIT_JSON = "anyps5-audit.json"
 RUNTIME_DLLS = ("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll")
 
@@ -1092,19 +1093,58 @@ def install_from_build(repo: Path, toolchain: Path, destination: Path, log: Log)
     # Swap whole folders, so files a running conversion holds open are never rewritten in place.
     previous = destination.with_name(destination.name + ".old")
     if previous.exists():
-        remove_tree(previous, destination.parent)
+        if destination.exists():
+            remove_tree(previous, destination.parent)
+        else:
+            # An earlier swap stopped half-way, so the .old folder is the install: put it back before going on.
+            replace_when_free(previous, destination)
     if destination.exists():
-        os.replace(destination, previous)
-    os.replace(staging, destination)
+        replace_when_free(destination, previous)
+    try:
+        replace_when_free(staging, destination)
+    except OSError as error:
+        if previous.exists() and not destination.exists():
+            try:
+                replace_when_free(previous, destination)
+            except OSError:
+                pass
+        kept = "The previous AnyPS5 is still installed" if destination.exists() else f"The previous AnyPS5 is kept in {previous}"
+        raise LauncherError(f"Windows would not let the launcher move the new build into {destination} ({error.strerror}). "
+                            f"A program such as antivirus or OneDrive was probably still reading the new files. {kept}; "
+                            "run the update again.") from error
     if previous.exists():
         remove_tree(previous, destination.parent)
     log(f"Installed {len(libraries)} libraries and the relinker into {destination} (main {revision})", "ok")
 
 
+def replace_when_free(source: Path, target: Path, attempts: int = 40, delay: float = 0.5) -> None:
+    """os.replace, retried while another program (antivirus, OneDrive, an Explorer window) still holds a file inside."""
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def update_from_source(repo: Path, toolchain: Path, destination: Path, log: Log,
                        cancel: Optional[threading.Event] = None, keep_edits: bool = True) -> None:
     """Pulls, builds and installs AnyPS5. Edits made to the checkout are carried over (`keep_edits`), or set aside in
-    git's stash so the official code is built."""
+    git's stash so the official code is built. Everything logged is also written to <data>/anyps5-last-update.log."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(DATA_DIR / UPDATE_LOG, "w", encoding="utf-8", errors="replace") as record:
+        def logged(text: str, tag: str = "info") -> None:
+            record.write(f"{text}\n")
+            record.flush()
+            log(text, tag)
+
+        build_and_install(repo, toolchain, destination, logged, cancel, keep_edits)
+
+
+def build_and_install(repo: Path, toolchain: Path, destination: Path, log: Log,
+                      cancel: Optional[threading.Event], keep_edits: bool) -> None:
     if not (repo / ".git").exists():
         raise LauncherError(f"No AnyPS5 source checkout at {repo}. Set its location in Settings.")
     if not (toolchain / "g++.exe").is_file():
@@ -1124,9 +1164,17 @@ def update_from_source(repo: Path, toolchain: Path, destination: Path, log: Log,
     for step in steps:
         if cancel is not None and cancel.is_set():
             raise LauncherError("Cancelled")
-        if run_streaming(step, log, cwd=repo, env=env, cancel=cancel) != 0:
+        code = run_streaming(step, log, cwd=repo, env=env, cancel=cancel)
+        if code != 0 and step[1] == "--build" and not (cancel is not None and cancel.is_set()):
+            # A build that runs out of memory, or meets a file another program holds, fails without a code error;
+            # the files that did compile are kept, so one slower retry costs little.
+            jobs = max(1, (os.cpu_count() or 2) // 2)
+            log(f"The build failed. Trying once more with {jobs} parallel jobs, in case it ran out of memory.", "warn")
+            code = run_streaming([*step, str(jobs)], log, cwd=repo, env=env, cancel=cancel)
+        if code != 0:
             edited = local_edits(repo)
-            raise LauncherError(f"'{' '.join(str(part) for part in step[:4])}' failed; see the log."
+            raise LauncherError(f"'{' '.join(str(part) for part in step[:4])}' failed; see the log "
+                                f"({DATA_DIR / UPDATE_LOG})."
                                 + (f" The AnyPS5 source has your own edits ({', '.join(edited[:3])}); they may be the "
                                    "cause." if edited and step[1] == "--build" else ""))
     after = git_output(repo, "rev-parse", "--short", "HEAD")
